@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rally Co-Driver (Debug Edition)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 500px;
+            background: #2d2d2d;
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border: 2px solid #ffcc00;
+        }
+        h1 { color: #ffcc00; text-transform: uppercase; letter-spacing: 2px; margin-top: 0; }
+        .input-group { margin-bottom: 15px; text-align: left; position: relative; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 12px; text-transform: uppercase; }
+        input {
+            width: 100%;
+            padding: 12px;
+            background: #111;
+            color: #fff;
+            border: 1px solid #444;
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        #suggestions {
+            position: absolute;
+            top: 42px;
+            left: 0;
+            width: 100%;
+            background: #3d3d3d;
+            border: 1px solid #555;
+            border-radius: 0 0 8px 8px;
+            z-index: 1000;
+            max-height: 200px;
+            overflow-y: auto;
+            text-align: left;
+            display: none;
+        }
+        .suggestion-item {
+            padding: 10px;
+            cursor: pointer;
+            border-bottom: 1px solid #444;
+            font-size: 14px;
+        }
+        .suggestion-item:hover { background: #ffcc00; color: #000; }
+        button {
+            background-color: #ffcc00;
+            color: #000;
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+        }
+        button:disabled { background-color: #666; cursor: not-allowed; }
+        .current-note {
+            font-size: 28px;
+            font-weight: bold;
+            margin: 20px 0;
+            color: #ffcc00;
+            min-height: 1.2em;
+            text-transform: uppercase;
+        }
+        #map {
+            height: 200px;
+            width: 100%;
+            margin-top: 20px;
+            border-radius: 8px;
+            background: #111;
+        }
+        .status { font-size: 12px; color: #888; margin-top: 10px; }
+        #debugLog {
+            margin-top: 20px;
+            background: #000;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 11px;
+            text-align: left;
+            padding: 10px;
+            height: 100px;
+            overflow-y: auto;
+            border-radius: 4px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Rally Free Debug</h1>
+        
+        <div class="input-group">
+            <label>Destination Address</label>
+            <input type="text" id="endAddr" placeholder="Type location..." autocomplete="off">
+            <div id="suggestions"></div>
+        </div>
+        
+        <button id="startBtn">START STAGE</button>
+        
+        <div id="currentNote" class="current-note">Awaiting Start</div
+        <div id="map"></div
+        <div id="status" class="status">GPS Idle</div
+        
+        <div id="debugLog">Debug Log: Initializing...</div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const synth = window.speechSynthesis;
+        let watchId = null;
+        let routeWaypoints = [];
+        let currentStepIndex = 0;
+        let map, userMarker;
+        let audioUnlocked = false;
+
+        function log(msg) {
+            const el = document.getElementById('debugLog');
+            el.innerHTML += `<br>[${new Date().toLocaleTimeString()}] ${msg}`;
+            el.scrollTop = el.scrollHeight;
+            console.log(msg);
+        }
+
+        function unlockAudio() {
+            if (!audioUnlocked) {
+                log("Unlocking audio engine...");
+                const utterance = new SpeechSynthesisUtterance("");
+                synth.speak(utterance);
+                audioUnlocked = true;
+            }
+        }
+
+        function getDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const φ1 = lat1 * Math.PI/180;
+            const φ2 = lat2 * Math.PI/180;
+            const Δφ = (lat2-lat1) * Math.PI/180;
+            const Δλ = (lon2-lon1) * Math.PI/180;
+            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                      Math.cos(φ1) * Math.cos(φ2) *
+                      Math.sin(Δλ/2) * Math.sin(Δλ/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        function speak(text) {
+            log("Speaking: " + text);
+            synth.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.3;
+            synth.speak(utterance);
+            document.getElementById('currentNote').innerText = text;
+        }
+
+        const endInput = document.getElementById('endAddr');
+        const suggestionsDiv = document.getElementById('suggestions');
+
+        endInput.addEventListener('input', async () => {
+            const query = endInput.value;
+            if (query.length < 3) {
+                suggestionsDiv.style.display = 'none';
+                return;
+            }
+            try {
+                log("Fetching suggestions...");
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+                const data = await res.json();
+                suggestionsDiv.innerHTML = '';
+                if (data.length > 0) {
+                    data.forEach(item => {
+                        const div = document.createElement('div');
+                        div.className = 'suggestion-item';
+                        div.innerText = item.display_name;
+                        div.onclick = () => {
+                            endInput.value = item.display_name;
+                            suggestionsDiv.style.display = 'none';
+                            log("Selected: " + item.display_name);
+                        };
+                        suggestionsDiv.appendChild(div);
+                    });
+                    suggestionsDiv.style.display = 'block';
+                } else {
+                    suggestionsDiv.style.display = 'none';
+                }
+            } catch (e) {
+                log("Suggestion Error: " + e.message);
+            }
+        });
+
+        async function geocode(address) {
+            log("Geocoding address...");
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`);
+            const data = await res.json();
+            if (data.length === 0) throw new Error("Address not found");
+            return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+        }
+
+        async function startNavigation() {
+            log("Start Button Pressed");
+            unlockAudio();
+            const endAddr = document.getElementById('endAddr').value;
+            if (!endAddr) return alert("Please enter a destination");
+
+            try {
+                const dest = await geocode(endAddr);
+                log(`Destination Found: ${dest.lat}, ${dest.lon}`);
+                
+                log("Requesting GPS Location...");
+                navigator.geolocation.getCurrentPosition(async (pos) => {
+                    log("GPS Acquired");
+                    const startLat = pos.coords.latitude;
+                    const startLon = pos.coords.longitude;
+
+                    log("Fetching route from OSRM...");
+                    const routeRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${startLon},${startLat};${dest.lon},${dest.lat}?overview=full&steps=true`);
+                    const routeData = await routeRes.json();
+                    
+                    if (routeData.code !== "Ok") throw new Error("Routing failed: " + routeData.code);
+
+                    log("Route received. Processing steps...");
+                    const steps = routeData.routes[0].legs[0].steps;
+                    routeWaypoints = steps.map(s => s.end_location);
+                    currentStepIndex = 0;
+
+                    initMap(startLat, startLon, dest.lat, dest.lon);
+                    beginTracking();
+                }, (err) => {
+                    log("GPS Error: " + err.message);
+                    alert("GPS Error: " + err.message + ". Ensure you are using HTTPS and have location enabled.");
+                }, { enableHighAccuracy: true });
+            } catch (e) {
+                log("Critical Error: " + e.message);
+                alert(e.message);
+            }
+        }
+
+        function initMap(sLat, sLon, dLat, dLon) {
+            log("Initializing Map...");
+            if (map) return;
+            map = L.map('map').setView([sLat, sLon], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+            userMarker = L.marker([sLat, sLon]).addTo(map);
+            L.marker([dLat, dLon]).addTo(map).bindPopup("Destination");
+        }
+
+        function beginTracking() {
+            log("Starting real-time tracking...");
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').innerText = "STAGE ACTIVE";
+
+            watchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    const { latitude, longitude } = pos.coords;
+                    if (userMarker) userMarker.setLatLng([latitude, longitude]);
+                    document.getElementById('status').innerText = `GPS: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+
+                    if (currentStepIndex < routeWaypoints.length) {
+                        const target = routeWaypoints[currentStepIndex];
+                        const dist = getDistance(latitude, longitude, target[1], target[0]);
+
+                        if (dist < 40) {
+                            const note = (currentStepIndex % 3 === 0) ? "Left 4" : (currentStepIndex % 3 === 1 ? "Right 4" : "Slight 5");
+                            speak(note);
+                            currentStepIndex++;
+                            log(`Waypoint ${currentStepIndex} reached!`);
+                        }
+                    } else {
+                        speak("Stage Complete!");
+                        stopTracking();
+                    }
+                },
+                (err) => log("Watch Error: " + err.message), 
+                { enableHighAccuracy: true }
+            );
+        }
+
+        function stopTracking() {
+            log("Stopping tracking.");
+            if (watchId) navigator.geolocation.clearWatch(watchId);
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('startBtn').innerText = "START STAGE";
+        }
+
+        document.getElementById('startBtn').onclick = startNavigation;
+    </script>
+</body>
+</html>
